@@ -234,12 +234,17 @@ Ponieważ przełączniki w oddziałach działają wyłącznie w warstwie 2, zada
 *   **Podinterfejsy (Subinterfaces):** Główny interfejs fizyczny routera skierowany do sieci LAN został podzielony na logiczne podinterfejsy odpowiadające poszczególnym numerom VLAN (np. `interface GigabitEthernet0/1.20` dla VLAN 20).
 *   **Tagowanie 802.1Q:** Na każdym podinterfejsie włączono obsługę tagowania ramek w standardzie IEEE 802.1Q (`encapsulation dot1Q [VLAN_ID]`) oraz przypisano właściwy adres IP pełniący funkcję lokalnej bramy domyślnej (`.1`).
 
-### 2. Bezpieczna łączność WAN (GRE over IPsec do Centrali)
+### 2. Lokalna Adresacja IP (Lokalny Serwer DHCP na Routerach Edge)
+W celu uniezależnienia oddziałów od działania łączy WAN/VPN i zapewnienia ciągłości pracy sieci LAN w przypadku awarii tuneli, obsługa adresacji IP została w pełni rozproszona:
+*   **Lokalne pule DHCP:** Routery brzegowe `EDGE-BR1` oraz `EDGE-BR2` same pełnią funkcję serwerów DHCP dla swoich lokalnych podsieci. Skonfigurowano na nich dedykowane pule `ip dhcp pool` dla poszczególnych VLAN-ów (USERS, GUEST, IT, VOIP).
+*   **Autonomia oddziałów:** Stacje robocze, goście oraz telefony VoIP w oddziałach pobierają adresację bezpośrednio z lokalnego routera. Wyeliminowało to potrzebę stosowania mechanizmu DHCP Relay (ip helper-address) przez sieć WAN i zabezpieczyło oddziały przed paraliżem sieci lokalnej w przypadku problemów z tunelem do Centrali.
+
+### 3. Bezpieczna łączność WAN (GRE over IPsec do Centrali)
 Z poziomu routerów oddziałowych zrealizowano szyfrowane połączenia do sieci rozległej:
 *   **Kryptografia do Centrali:** Routery `EDGE-BR1` oraz `EDGE-BR2` zestawiają bezpieczne, szyfrowane tunele **GRE over IPsec** bezpośrednio do głównych routerów w Centrali (`EDGE-R1` oraz `EDGE-R2`).
 *   **Filtrowanie ruchu tunelowego (ACL 101 & ACL 102):** Na zewnętrznych interfejsach WAN routerów oddziałowych wdrożono dedykowane listy rozszerzone kontrolujące ruch GRE. Zezwalają one na tunelowanie pakietów wyłącznie pomiędzy autoryzowanymi publicznymi adresami IP routerów brzegowych (np. z `192.51.100.9` do `192.51.100.1` dla `EDGE-R1` oraz do `192.51.100.5` dla `EDGE-R2`), odrzucając wszelkie inne próby manipulacji na porcie GRE z Internetu.
 
-### 3. Implementacja Bezpieczeństwa w Oddziałach (Filtrowanie ACL)
+### 4. Implementacja Bezpieczeństwa w Oddziałach (Filtrowanie ACL)
 Na podinterfejsach routerów brzegowych w oddziałach zaaplikowano rozszerzone listy kontroli dostępu, zabezpieczające ruch lokalny oraz międzysieciowy:
 
 *   **`SEC-USERS` (Kontrola ruchu użytkowników oddziału):**
@@ -258,7 +263,7 @@ Na podinterfejsach routerów brzegowych w oddziałach zaaplikowano rozszerzone l
 *   **`SSH-ACCESS` / `TELNET-ACCESS` (Zabezpieczenie linii VTY):**
     *   Dostęp do linii wirtualnych switchów i routerów w oddziałach został ograniczony standardową listą kontrolną. Gwarantuje ona, że sesję administracyjną (Telnet na switchach, SSH na routerach) można otworzyć wyłącznie z komputerów inżynierów IT w firmie (`10.0.15.0/24`, `10.1.50.0/24`, `10.2.50.0/24`).
 
-### 4. Konfiguracja i Bezpieczeństwo Przełączników Dostępowych (L2 Features)
+### 5. Konfiguracja i Bezpieczeństwo Przełączników Dostępowych (L2 Features)
 Lokalne przełączniki dostępowe `BR1-SW1` oraz `BR2-SW1` odpowiadają za prawidłową separację ruchu oraz ochronę portów abonenckich:
 *   **Podział na VLANy i Porty Access:** Wszystkie porty końcowe zostały na sztywno skonfigurowane w tryb dostępowy (`switchport mode access`) i przypisane do odpowiednich VLAN-ów (MGMT, USERS, LOCAL, GUEST, IT, VOIP).
 *   **Dual-VLAN dla aparatów VoIP:** Porty biurkowe obsługują jednoczesny ruch komputera (nietagowany w VLAN 20) oraz ruch głosowy telefonu (automatycznie tagowany w VLAN 60) za pomocą komendy `switchport voice vlan 60`.
@@ -269,10 +274,10 @@ Lokalne przełączniki dostępowe `BR1-SW1` oraz `BR2-SW1` odpowiadają za prawi
 
 Wszystkie usługi sieciowe oraz system nadzoru infrastruktury zostały wdrożone bezpośrednio na dedykowanych systemach Linux w strefie serwerowej (VLAN 100), zapewniając pełną automatyzację i widoczność (Observability) procesów sieciowych.
 
-### 1. Centralna Adresacja IPAM (Debian 12 — DHCP Server)
-*   **isc-dhcp-server:** Na systemie Debian 12 skonfigurowano klasyczny, stabilny serwer DHCP. Odpowiada on za dynamiczne przydzielanie adresów IP, masek, bram domyślnych oraz serwerów DNS dla wszystkich podsieci klienckich, gościnnych oraz VoIP w Centrali i Oddziałach.
-*   **Integracja z DHCP Relay:** Serwer nasłuchuje na interfejsie `eth0` (konfiguracja w `/etc/default/isc-dhcp-server` oraz `/etc/network/interfaces`) i przetwarza pakiety Unicast przesyłane przez agentów DHCP Relay (`ip helper-address`) z urządzeń sieciowych Cisco.
-*   *Pliki konfiguracyjne:* Pełna struktura produkcyjna `/etc/dhcp/dhcpd.conf` znajduje się w katalogu `server-configs/debian-dhcp/`.
+### 1. Centralna Adresacja IPAM w Centrali (Debian 12 — DHCP Server)
+*   **isc-dhcp-server:** Na systemie Debian 12 skonfigurowano klasyczny, stabilny serwer DHCP. Jest on odpowiedzialny **wyłącznie za obsługę sieci lokalnych w obrębie Centrali** (w tym wszystkich podsieci użytkowników SW1-SW4, sieci gościnnej VLAN 90 oraz telefonii VoIP VLAN 21-61).
+*   **Integracja z DHCP Relay Agent:** Serwer nasłuchuje na interfejsie `ens3` (konfiguracja w `server-configs/debian-dhcp/default/isc-dhcp-server` oraz `server-configs/debian-dhcp/network/interfaces`). Przetwarza on pakiety Unicast przesyłane przez agentów DHCP Relay (`ip helper-address 10.0.100.10`) skonfigurowanych na interfejsach SVI przełączników rdzeniowych `CORE-SW1` i `CORE-SW2`.
+*   *Pliki konfiguracyjne:* Pełna struktura produkcyjna znajduje się w katalogu `server-configs/debian-dhcp/`.
 
 ### 2. Centralny System Monitoringu (Ubuntu Server — Zabbix NMS)
 W celu proaktywnego monitorowania stanu zdrowia sieci, na systemie Ubuntu wdrożono platformę **Zabbix NMS** komunikującą się z urządzeniami Cisco za pomocą protokołu **SNMPv2c**.
