@@ -264,3 +264,32 @@ Lokalne przełączniki dostępowe `BR1-SW1` oraz `BR2-SW1` odpowiadają za prawi
 *   **Dual-VLAN dla aparatów VoIP:** Porty biurkowe obsługują jednoczesny ruch komputera (nietagowany w VLAN 20) oraz ruch głosowy telefonu (automatycznie tagowany w VLAN 60) za pomocą komendy `switchport voice vlan 60`.
 *   **Konfiguracja Portów Magistralnych (Trunking):** Połączenie pomiędzy przełącznikiem a routerem brzegowym (uplink ROAS) działa jako magistrala trunk (`switchport mode trunk`), przesyłając ruch ze wszystkich lokalnych sieci przy użyciu tagowania 802.1Q.
 *   **Bezpieczeństwo DHCP (DHCP Snooping):** Na switchach w oddziałach aktywowano funkcję DHCP Snooping w celu blokady fałszywych serwerów DHCP. Port magistralny (Trunk) prowadzący do routera brzegowego został oznaczony jako zaufany (`ip dhcp snooping trust`), natomiast wszystkie porty abonenckie i gościnne są niezaufane, co zapobiega wstrzykiwaniu nieautoryzowanej adresacji w oddziale.
+
+## Konfiguracja Usług Linux i Centralny Monitoring
+
+Wszystkie usługi sieciowe oraz system nadzoru infrastruktury zostały wdrożone bezpośrednio na dedykowanych systemach Linux w strefie serwerowej (VLAN 100), zapewniając pełną automatyzację i widoczność (Observability) procesów sieciowych.
+
+### 1. Centralna Adresacja IPAM (Debian 12 — DHCP Server)
+*   **isc-dhcp-server:** Na systemie Debian 12 skonfigurowano klasyczny, stabilny serwer DHCP. Odpowiada on za dynamiczne przydzielanie adresów IP, masek, bram domyślnych oraz serwerów DNS dla wszystkich podsieci klienckich, gościnnych oraz VoIP w Centrali i Oddziałach.
+*   **Integracja z DHCP Relay:** Serwer nasłuchuje na interfejsie `eth0` (konfiguracja w `/etc/default/isc-dhcp-server` oraz `/etc/network/interfaces`) i przetwarza pakiety Unicast przesyłane przez agentów DHCP Relay (`ip helper-address`) z urządzeń sieciowych Cisco.
+*   *Pliki konfiguracyjne:* Pełna struktura produkcyjna `/etc/dhcp/dhcpd.conf` znajduje się w katalogu `server-configs/debian-dhcp/`.
+
+### 2. Centralny System Monitoringu (Ubuntu Server — Zabbix NMS)
+W celu proaktywnego monitorowania stanu zdrowia sieci, na systemie Ubuntu wdrożono platformę **Zabbix NMS** komunikującą się z urządzeniami Cisco za pomocą protokołu **SNMPv2c**.
+
+#### Monitorowanie Aktywne (SNMP Polling)
+Zabbix cyklicznie odpytuje przełączniki CORE oraz routery EDGE, zbierając kluczowe metryki wydajnościowe: obciążenie procesorów (CPU), zużycie pamięci RAM, status operacyjny portów oraz liczniki błędów (CRC/input/output errors) na interfejsach. Wszystkie urządzenia zostały pomyślnie zintegrowane w panelu przez SNMP:
+
+![Lista monitorowanych hostów w Zabbix](topology/zabbix_hosts.png)
+*(Powyższy zrzut ekranu z panelu Zabbix potwierdza aktywny status komunikacji SNMP dla wszystkich węzłów sieci).*
+
+#### Monitorowanie Zdarzeniowe (SNMP Traps)
+Aby wyeliminować opóźnienia w wykrywaniu awarii, wdrożono obsługę **SNMP Traps**:
+*   **snmptrapd:** Na poziomie systemu Ubuntu skonfigurowano i uruchomiono daemon systemowy (`/etc/snmp/snmptrapd.conf`) nasłuchujący na dedykowanym porcie **UDP 162**.
+*   **Natychmiastowe alerty:** W momencie wystąpienia zdarzenia (np. zmiana stanu HSRP z Active na Standby, awaria łącza), urządzenia Cisco natychmiast wysyłają pakiet Trap do serwera. Usługa systemowa przechwytuje komunikat i przekazuje go do Zabbixa, co pozwala na generowanie alertów w czasie rzeczywistym, pomijając standardowy interwał odpytywania.
+
+#### Dynamiczna Mapa Topologii Sieci
+W panelu Zabbix skonfigurowano graficzną mapę sieci odzwierciedlającą realną topologię z GNS3. Połączenia między ikonami routerów brzegowych zostały logicznie powiązane z triggerami interfejsów tunelowych VPN (GRE over IPsec).
+
+![Mapa sieci w Zabbix](topology/zabbix_map.png)
+*(W przypadku awarii dowolnego tunelu rozległego WAN lub łącza międzyoddziałowego, linia na mapie automatycznie zmienia kolor na czerwony, sygnalizując stan awarii).*
