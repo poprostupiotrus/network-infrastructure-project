@@ -114,3 +114,63 @@ Dla każdej podsieci użytkowej i serwerowej w Centrali (VLAN 10 do 110) obowią
 | **EDGE-R1** | EDGE-BR2 | `10.255.0.4/30` | `10.255.0.5` | `10.255.0.6` |
 | **EDGE-R2** | EDGE-BR1 | `10.255.0.8/30` | `10.255.0.9` | `10.255.0.10` |
 | **EDGE-R2** | EDGE-BR2 | `10.255.0.12/30` | `10.255.0.13` | `10.255.0.14` |
+
+## Konfiguracja Warstwy Dostępowej (Access Layer) w Centrali
+
+Wszystkie przełączniki dostępowe (`ACCESS_SW1` do `ACCESS_SW5` w Centrali) działają w warstwie 2 (Layer 2). Odpowiadają za fizyczne podłączenie urządzeń końcowych, komputerów, telefonów oraz serwerów, realizując przy tym mechanizmy izolacji i bezpieczeństwa na poziomie portów.
+
+### 1. Struktura i Przypisanie VLAN-ów do Przełączników (HQ)
+
+Konfiguracja sieci VLAN na poszczególnych przełącznikach dostępowych została podzielona w następujący sposób:
+
+*   **ACCESS_SW1 (Główny Przełącznik Dostępów / Serwerownia & Sekcja A):**
+    *   **VLAN 10 (MGMT):** Sieć zarządcza dla infrastruktury.
+    *   **VLAN 15 (IT_DEPT):** Podsieć dla stacji roboczych administratorów (w tym `ADMIN-PC`).
+    *   **VLAN 20 (SW1_USERS):** Ruch komputerowy pierwszej grupy pracowników.
+    *   **VLAN 21 (SW1_VOIP):** Ruch dla aparatów VoIP pierwszej grupy pracowników.
+    *   **VLAN 100 (SERVERS):** Krytyczna strefa serwerowa (`DHCP-SERVER`, `WEB-SERVER`, `ZABBIX-SERVER`, `VOIP-GATEWAY`).
+    *   **VLAN 110 (PRINTERS):** Centralna strefa sieciowych urządzeń drukujących.
+
+*   **ACCESS_SW2 do ACCESS_SW5 (Przełączniki dla Sekcji Użytkowników, Gości i Drukarek):**
+    Każdy z pozostałych przełączników dostępowych posiada analogiczny zestaw VLAN-ów, umożliwiający obsługę lokalnych pracowników, telefonii, ruchu gościnnego oraz dostęp do urządzeń drukujących i sieci zarządzania:
+    *   **VLAN 10 (MGMT):** Dostęp do wirtualnego interfejsu zarządzania danego switcha.
+    *   **VLAN 110 (PRINTERS):** Lokalny dostęp do sieciowych drukarek korporacyjnych.
+    *   **VLAN 90 (GUEST):** Ruch odizolowanej sieci bezprzewodowej/przewodowej dla gości.
+    *   **VLAN-y Użytkowe i VoIP (Dedykowane per Switch):**
+        *   Na **ACCESS_SW2**: `VLAN 30` (SW2_USERS) oraz `VLAN 31` (SW2_VOIP)
+        *   Na **ACCESS_SW3**: `VLAN 40` (SW3_USERS) oraz `VLAN 41` (SW3_VOIP)
+        *   Na **ACCESS_SW4**: `VLAN 50` (SW4_USERS) oraz `VLAN 51` (SW4_VOIP)
+        *   Na **ACCESS_SW5**: `VLAN 60` (SW5_USERS) oraz `VLAN 61` (SW5_VOIP)
+
+---
+
+### 2. Bezpieczeństwo DHCP (DHCP Snooping)
+W celu ochrony sieci LAN przed nieautoryzowanymi lub złośliwymi serwerami DHCP (ataki typu *Rogue DHCP Server*), na wszystkich przełącznikach dostępowych aktywowano funkcję **DHCP Snooping**:
+*   **Porty Zaufane (Trusted Ports):** Fizyczne porty uplink prowadzące w stronę przełączników rdzeniowych `CORE-SW1` i `CORE-SW2` (oraz interfejs podłączenia serwera DHCP na `ACCESS_SW1`) zostały skonfigurowane jako zaufane (`ip dhcp snooping trust`). Tylko przez te porty dopuszczalne jest przesyłanie pakietów typu *DHCP Offer* oraz *DHCP Ack*.
+*   **Porty Niezaufane (Untrusted Ports):** Wszystkie porty abonenckie dla użytkowników końcowych, telefonów oraz gości są domyślnie niezaufane. Wpięcie fałszywego serwera DHCP w jakiekolwiek gniazdo biurkowe skutkuje natychmiastowym zablokowaniem nieautoryzowanych pakietów konfiguracyjnych, chroniąc sieć przed paraliżem adresacji.
+*   **Włączenie globalne:** Mechanizm został uruchomiony globalnie (`ip dhcp snooping`) i powiązany ze wszystkimi obsługiwanymi VLAN-ami.
+
+---
+
+### 3. Mechanizmy Warstwy Dostępowej (L2 Features)
+
+#### Porty Dostępowe (Access Mode) i Dual-VLAN dla VoIP
+*   Wszystkie porty abonenckie zostały na sztywno przełączone w tryb dostępowy (`switchport mode access`).
+*   W miejscach pracy wymagających jednoczesnego podłączenia PC oraz aparatu telefonicznego wdrożono technologię **Dual-VLAN**. Przełącznik przesyła pakiety komputera jako nietagowane w dedykowanym VLAN-ie użytkowników (np. `VLAN 30`), a ruch telefoniczny automatycznie taguje i odseparowuje w skorelowanym VLAN-ie VoIP (np. `VLAN 31`) za pomocą komendy `switchport voice vlan [ID]`.
+
+#### Trunking i Bezpieczeństwo Native VLAN (802.1Q)
+*   Uplinki do przełączników rdzeniowych działają jako magistrale trunk (`switchport mode trunk`) w standardzie tagowania IEEE 802.1Q.
+*   W celu zabezpieczenia sieci przed atakami klasy *VLAN Hopping*, domyślny `VLAN 1` został całkowicie wyłączony z obsługi przesyłu danych. Cały ruch nietagowany (np. ramki kontrolne protokołów L2) został przeniesiony do odizolowanego, nieużywanego produkcyjnie VLAN-u natywnego za pomocą komendy `switchport trunk native vlan 999`.
+
+#### Optymalizacja i Ochrona Topologii STP (Spanning Tree)
+*   **PortFast:** Uruchomiony na portach końcowych (Edge Ports). Pomija stany listening/learning, natychmiast podnosząc interfejs w stan `Forwarding` po podłączeniu kabla, co eliminuje problemy z czasem oczekiwania (timeout) stacji na adres IP z DHCP.
+*   **BPDU Guard:** Funkcja ochronna powiązana z PortFast. Podłączenie do gniazda ściennego nieautoryzowanego switcha generującego ramki BPDU skutkuje natychmiastowym wprowadzeniem portu w stan awaryjny `err-disabled`, zapobiegając pętlom i destabilizacji drzewa STP.
+*   **BPDU Filter:** Funkcja która pozwala wyłączyć przesyłanie pakietów BPDU, została włączona na portach do której wpięte są urządzenia końcowe.
+
+#### Dostęp Zdalny i Zarządzanie (Management Plane)
+*   **Wirtualny interfejs SVI (VLAN 10):** Każdy przełącznik posiada skonfigurowany adres IP w dedykowanym `VLAN 10 MGMT` do celów administracyjnych. Do poprawnego routingu ruchu zarządzającego poza sieć lokalną skonfigurowano bramę domyślną (`ip default-gateway 10.0.10.1`) kierującą na wirtualny adres bramy HSRP.
+*   **Protokół Telnet zamiast SSH:** Dostęp zdalny do CLI przełączników został skonfigurowany z wykorzystaniem protokołu **Telnet**. Decyzja ta wynikała bezpośrednio z ograniczeń technicznych środowiska symulacyjnego GNS3 — zastosowane obrazy IOU (IOS on Unix) dla przełączników L2 nie posiadały wsparcia dla kryptografii i nie obsługiwały protokołu SSH. W środowisku produkcyjnym bezwzględnie zalecane jest stosowanie protokołu SSH, ponieważ Telnet przesyła dane (w tym hasła) otwartym tekstem, podczas gdy SSH zapewnia w pełni szyfrowaną i bezpieczną komunikację.
+*   **Zabezpieczenie linii VTY za pomocą ACL:** Pomimo ograniczeń protokołu Telnet, płaszczyzna zarządzania została maksymalnie zabezpieczona na poziomie kontroli dostępu. Do linii wirtualnych (`line vty 0 4`) przypisano listę kontrolną za pomocą komendy `access-class TELNET-ACCESS in`. Ta lista ACL restrykcyjnie ogranicza możliwość nawiązania sesji zdalnej, zezwalając na dostęp do CLI switcha wyłącznie zautoryzowanym podsieciom działu IT:
+    *   `10.0.15.0/24` (Sieć IT w Centrali)
+    *   `10.1.50.0/24` (Sieć IT w Oddziale 1)
+    *   `10.2.50.0/24` (Sieć IT w Oddziale 2)
