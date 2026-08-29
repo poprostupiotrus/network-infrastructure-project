@@ -1,3 +1,4 @@
+# Projekt infrastruktury sieciowej w środowisku GNS3
 ## Wprowadzenie i Opis Projektu
 Projekt obejmuje wykonanie projektu logicznego oraz konfiguracji infrastruktury sieciowej dla Centrali (HQ) oraz dwóch oddziałów zamiejscowych (Branch 1 i Branch 2). Środowisko zostało zaprojektowane 
 pod kątem zapewnienia bezpiecznej komunikacji między lokalizacjami oraz pełnego monitoringu urządzeń z wykorzystaniem urządzeń Cisco oraz usług serwerowych: centralnego serwera DHCP (isc-dhcp-server) wdrożonego na systemie Debian 12 
