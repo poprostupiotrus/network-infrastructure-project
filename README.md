@@ -174,3 +174,93 @@ W celu ochrony sieci LAN przed nieautoryzowanymi lub złośliwymi serwerami DHCP
     *   `10.0.15.0/24` (Sieć IT w Centrali)
     *   `10.1.50.0/24` (Sieć IT w Oddziale 1)
     *   `10.2.50.0/24` (Sieć IT w Oddziale 2)
+
+## Konfiguracja Warstwy Rdzeniowej (Core Layer) w Centrali
+
+Warstwa rdzeniowa opiera się na dwóch przełącznikach warstwy 3 (`CORE-SW1` oraz `CORE-SW2`). Realizują one routing lokalny, dynamiczny, dystrybucję DHCP oraz wymuszają bezpieczeństwo i wysoką dostępność.
+
+### 1. Inter-VLAN Routing i Obsługa DHCP
+*   **Routing IP:** Globalnie włączono funkcję `ip routing`. Przełączniki realizują routing międzyvlanowy (Inter-VLAN Routing) bezpośrednio na interfejsach wirtualnych SVI.
+*   **DHCP Relay Agent:** Na interfejsach SVI skonfigurowano komendę `ip helper-address 10.0.100.10`. Przekazuje ona lokalne rozgłoszenia DHCP (VLAN-ów użytkowników, gości i VoIP) bezpośrednio do serwera Debian.
+
+### 2. Synchronizacja HSRP oraz Spanning Tree (STP)
+Wdrożono protokół **HSRP** do redundancji bram domyślnych i zsynchronizowano go z topologią **Spanning Tree (STP)**, aby urządzenia CORE pełniły rolę **Root Bridge** dla obsługiwanych przez siebie sieci. Zapobiega to asymetrycznemu routingowi i optymalizuje ścieżki pakietów:
+*   **CORE-SW1 (Primary Root Bridge / HSRP Active):** Konfiguracja `spanning-tree vlan [ID] root primary` oraz priorytet HSRP 110 (z włączonym wywłaszczaniem `preempt`) dla sieci: `VLAN 10` (MGMT), `VLAN 15` (IT), `VLAN 20/21` (SW1), `VLAN 40/41` (SW3), `VLAN 60/61` (SW5) oraz `VLAN 100` (SERVERS).
+*   **CORE-SW2 (Primary Root Bridge / HSRP Active):** Konfiguracja `spanning-tree vlan [ID] root primary` oraz priorytet HSRP 110 (z włączonym wywłaszczaniem `preempt`) dla sieci: `VLAN 30/31` (SW2), `VLAN 50/51` (SW4), `VLAN 90` (GUEST) oraz `VLAN 110` (PRINTERS).
+*   **STP Root Guard:** Na portach magistralnych (Trunk) łączących przełączniki rdzeniowe z przełącznikami dostępowymi włączono funkcję **Root Guard**. Gwarantuje ona, że żadne urządzenie w warstwie dostępowej nie przejmie roli głównego węzła (Root Bridge) w topologii STP, co zabezpiecza stabilność całej sieci przed nieautoryzowanymi zmianami.
+
+### 3. Routing Dynamiczny (OSPF)
+*   **Obszar Area 0:** `CORE-SW1` i `CORE-SW2` zestawiają sąsiedztwo OSPF z routerami brzegowymi `EDGE-R1/R2` przez dedykowane sieci `/30` (`10.0.250.0/24`).
+*   **Rozgłaszanie sieci:** Oba przełączniki Core ogłaszają swoje sieci SVI, dając routerom brzegowym pełną wiedzę o adresacji HQ. Interfejsy klienckie zabezpieczono komendą `passive-interface`.
+
+### 4. Podsumowanie List Kontroli Dostępu (ACL)
+*   **`SEC-GUEST` (Całkowita Izolacja Gości - Kierunek `in`):** Lista restrykcyjnie izoluje sieć gości (`10.0.90.0/24`). Zezwala wyłącznie na ruch DHCP do serwera (`10.0.100.10`) w celu pobrania adresacji, a następnie całkowicie blokuje (Deny) jakikolwiek ruch do wszystkich prywatnych sieci korporacyjnych (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). Ostatnia linia puszcza ruch wyłącznie na zewnątrz, dając gościom jedyny dostęp do Internetu.
+*   **`SEC-USERS` (Kontrola Ruchu Użytkowników - Kierunek `in`):** Pozwala pracownikom na dostęp wyłącznie do niezbędnych usług centralnych (serwer druku TCP 9100, DHCP do Debiana, WWW/HTTPS do serwera aplikacji `10.0.100.11`), po czym całkowicie odcina i blokuje im dostęp do pozostałych sieci prywatnych firmy (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`). Linia `permit ip any any` na końcu otwiera wyjście do Internetu.
+*   **`SEC-VOIP` (Kierunek `in`):** Otwiera sygnalizację SIP do centrali `10.0.100.20` oraz bezpośredni ruch audio RTP (porty 16384-32767) precyzyjnie pomiędzy wyznaczonymi podsieciami głosowymi Centrali i Oddziałów (komunikacja *SIP Direct Media*). Pozostały ruch RFC 1918 jest zablokowany.
+*   **`SEC-SERVERS` & `SEC-PRINTERS` (Filtry Zasobów):** Zezwalają na pełen dostęp dla podsieci IT Centrali i Oddziałów. Ograniczają ruch serwera monitoringu **Zabbix (10.0.100.12)** do SNMP/Traps z autoryzowanych interfejsów (w tym Loopbacków routerów `192.168.254.1-4` i switchy dostępowych `10.1.10.10` / `10.2.10.10`) oraz blokują skanowanie drukarek poza portem `TCP 9100`.
+*   **`SEC-MGMT` (Ochrona Zarządzania):** Zezwala na pełną komunikację IP wyłącznie z podsieci IT Centrali i Oddziałów oraz ruch SNMP/ICMP z serwera Zabbix, odrzucając próby połączeń ze wszystkich innych stref.
+
+## Konfiguracja Warstwy Brzegowej (Edge Layer) i połączeń WAN
+
+Warstwa brzegowa odpowiada za bezpieczną łączność międzyoddziałową (Centrala <-> Oddziały) poprzez publiczną sieć Internet oraz translację adresów dla ruchu wychodzącego na świat. Składa się z routerów `EDGE-R1` i `EDGE-R2` w Centrali oraz routerów `EDGE-BR1` i `EDGE-BR2` w oddziałach zamiejscowych.
+
+### 1. Bezpieczna łączność WAN (Szyfrowane tunele GRE over IPsec)
+W celu bezpiecznego połączenia Centrali z Oddziałami przez publiczną przestrzeń adresową WAN, pomiędzy routerami brzegowymi skonfigurowano tunele VPN w architekturze **GRE over IPsec**:
+*   **Tunele GRE (Generic Routing Encapsulation):** Zostały uruchomione jako interfejsy wirtualne (`interface Tunnel0` itp.) i zaadresowane w podsieciach `/30` z zakresu `10.255.0.0/24`. Tunele te umożliwiają przesyłanie ruchu rozgłoszeniowego (Broadcast/Multicast) oraz pakietów protokołów routingu pomiędzy lokalizacjami.
+*   **Szyfrowanie IPsec:** Cały ruch przechodzący przez instancje GRE został zabezpieczony profilami kryptograficznymi IPsec. Zapewnia to pełną poufność, integralność oraz uwierzytelnianie danych krążących w sieci rozległej między Centralą a routerami `EDGE-BR1` i `EDGE-BR2`.
+*   **Redundancja połączeń:** Każdy z routerów w oddziałach posiada niezależne tunele do obu routerów w centrali (`EDGE-R1` oraz `EDGE-R2`), co gwarantuje ciągłość działania komunikacji WAN w przypadku awarii jednego z urządzeń brzegowych w HQ.
+
+### 2. Routing Dynamiczny WAN (OSPF w Area 0)
+Wymiana informacji o trasach pomiędzy Centralą a Oddziałami odbywa się w sposób dynamiczny z wykorzystaniem protokołu **OSPF (Process ID 1)**:
+*   **Pełna integracja w Area 0:** Wszystkie interfejsy tunelowe (VPN) oraz interfejsy wirtualne **Loopback (192.168.254.1-4)** routerów brzegowych zostały włączone do głównego obszaru `area 0`.
+*   **Wymiana tras międzysieciowych:** Poprzez tunele VPN routery w oddziałach ogłaszają swoje lokalne VLAN-y (użytkownicy, goście, IT, VoIP), a routery w Centrali przekazują dalej sieci rozgłaszane przez przełączniki rdzeniowe CORE-SW. Dzięki temu cała struktura sieciowa posiada dynamicznie aktualizowaną tablicę routingu.
+
+### 3. Translacja Adresów (PAT - Port Address Translation)
+Aby umożliwić użytkownikom, gościom oraz telefonom VoIP dostęp do publicznej sieci Internet, na zewnętrznych interfejsach fizycznych WAN wszystkich routerów EDGE skonfigurowano translację adresów:
+*   **NAT Overload (PAT):** Ruch z wewnętrznych podsieci prywatnych firmy jest dynamicznie mapowany na pojedynczy, publiczny adres IP przypisany do interfejsu WAN routera.
+*   **Wykluczenie ruchu VPN z NAT:** Za pomocą list kontroli dostępu (ACL) ruch skierowany przez tunele VPN do innych oddziałów lub Centrali został jawnie wykluczony z procesu translacji (NAT Bypass). Dzięki temu pakiety międzysieciowe zachowują swoją oryginalną, prywatną adresację IP podczas przesyłania wewnątrz tuneli GRE over IPsec.
+
+### 4. Optymalizacja i stabilizacja połączeń (TCP MSS Tuning)
+*   **ip tcp adjust-mss 1360:** Ze względu na dodatkowy narzut bajtów generowany przez nagłówki tuneli GRE oraz szyfrowanie IPsec, na wszystkich interfejsach tunelowych zastosowano mechanizm korekty rozmiaru segmentu TCP.
+*   **Eliminacja fragmentacji:** Komenda ta wymusza na hostach końcowych obniżenie parametru MSS do 1360 bajtów już podczas nawiązywania sesji TCP (uścisk dłoni SYN/ACK). Zapobiega to przekraczaniu standardowego limitu MTU 1500 bajtów po dodaniu nagłówków VPN, co całkowicie wyeliminowało problem fragmentacji, gubienia dużych pakietów i przerw w działaniu aplikacji webowych oraz serwera monitoringu Zabbix.
+
+## Konfiguracja Oddziałów Zamiejscowych (Branch Layer)
+
+Konfiguracja urządzeń w Oddziale 1 (`EDGE-BR1`, `BR1-SW1`) oraz Oddziale 2 (`EDGE-BR2`, `BR2-SW1`) realizuje założenia lokalnej sieci LAN, zabezpieczeń L2/L3, ochrony brzegu oraz szyfrowanej komunikacji WAN. 
+
+### 1. Lokalny Routing i Adresacja IP (Router-on-a-Stick — ROAS)
+Ponieważ przełączniki w oddziałach działają wyłącznie w warstwie 2, zadanie routingu pomiędzy lokalnymi podsieciami zostało przeniesione na routery brzegowe:
+*   **Inter-VLAN Routing:** Routery `EDGE-BR1` oraz `EDGE-BR2` zostały skonfigurowane w architekturze **Router-on-a-Stick (ROAS)**. Ruch pomiędzy lokalnymi sieciami (np. komputery pracowników a sieć IT czy VoIP) jest przekazywany i przełączany bezpośrednio przez router brzegowy.
+*   **Podinterfejsy (Subinterfaces):** Główny interfejs fizyczny routera skierowany do sieci LAN został podzielony na logiczne podinterfejsy odpowiadające poszczególnym numerom VLAN (np. `interface GigabitEthernet0/1.20` dla VLAN 20).
+*   **Tagowanie 802.1Q:** Na każdym podinterfejsie włączono obsługę tagowania ramek w standardzie IEEE 802.1Q (`encapsulation dot1Q [VLAN_ID]`) oraz przypisano właściwy adres IP pełniący funkcję lokalnej bramy domyślnej (`.1`).
+
+### 2. Bezpieczna łączność WAN (GRE over IPsec do Centrali)
+Z poziomu routerów oddziałowych zrealizowano szyfrowane połączenia do sieci rozległej:
+*   **Kryptografia do Centrali:** Routery `EDGE-BR1` oraz `EDGE-BR2` zestawiają bezpieczne, szyfrowane tunele **GRE over IPsec** bezpośrednio do głównych routerów w Centrali (`EDGE-R1` oraz `EDGE-R2`).
+*   **Filtrowanie ruchu tunelowego (ACL 101 & ACL 102):** Na zewnętrznych interfejsach WAN routerów oddziałowych wdrożono dedykowane listy rozszerzone kontrolujące ruch GRE. Zezwalają one na tunelowanie pakietów wyłącznie pomiędzy autoryzowanymi publicznymi adresami IP routerów brzegowych (np. z `192.51.100.9` do `192.51.100.1` dla `EDGE-R1` oraz do `192.51.100.5` dla `EDGE-R2`), odrzucając wszelkie inne próby manipulacji na porcie GRE z Internetu.
+
+### 3. Implementacja Bezpieczeństwa w Oddziałach (Filtrowanie ACL)
+Na podinterfejsach routerów brzegowych w oddziałach zaaplikowano rozszerzone listy kontroli dostępu, zabezpieczające ruch lokalny oraz międzysieciowy:
+
+*   **`SEC-USERS` (Kontrola ruchu użytkowników oddziału):**
+    *   *Lokalne drukowanie:* Zezwala na ruch do sieci lokalnej drukarek (`10.1.30.0/24` dla BR1) wyłącznie na dedykowany port `TCP 9100`.
+    *   *Dostęp do serwerów Centrali:* Otwiera ruch webowy (`TCP 80` i `TCP 443`) do centralnego serwera aplikacji `10.0.100.11`.
+    *   *Izolacja korporacyjna:* Bezwzględnie odcina i blokuje użytkownikom dostęp do wszystkich pozostałych sieci prywatnych w firmie (klasy RFC 1918: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`).
+    *   *Internet:* Przepuszcza pozostały ruch zewnętrzny na zewnątrz (`permit ip any any`).
+
+*   **`SEC-GUEST` (Całkowita izolacja gości w oddziale):**
+    *   Lista zapewnia restrykcyjne odcięcie sieci gościnnej. Natychmiast blokuje (Deny) jakikolwiek ruch skierowany do adresów prywatnych korporacji (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), a linia `permit ip any any` na końcu gwarantuje gościom wyłącznie bezpośrednie wyjście do Internetu.
+
+*   **`SEC-MGMT` & `SEC-PRINTERS` (Ochrona zasobów oddziałowych):**
+    *   Zezwalają na pełen, nieograniczony dostęp do zarządzania oraz drukarek wyłącznie dla autoryzowanych podsieci działu IT Centrali (`10.0.15.0/24`), Oddziału 1 (`10.1.50.0/24`) oraz Oddziału 2 (`10.2.50.0/24`).
+    *   `SEC-MGMT` dopuszcza dodatkowo odpytywanie przez SNMP oraz diagnostyczny ICMP (ping) wyłącznie z centralnego serwera monitoringu **Zabbix (10.0.100.12)**.
+
+*   **`SSH-ACCESS` / `TELNET-ACCESS` (Zabezpieczenie linii VTY):**
+    *   Dostęp do linii wirtualnych switchów i routerów w oddziałach został ograniczony standardową listą kontrolną. Gwarantuje ona, że sesję administracyjną (Telnet na switchach, SSH na routerach) można otworzyć wyłącznie z komputerów inżynierów IT w firmie (`10.0.15.0/24`, `10.1.50.0/24`, `10.2.50.0/24`).
+
+### 4. Konfiguracja i Bezpieczeństwo Przełączników Dostępowych (L2 Features)
+Lokalne przełączniki dostępowe `BR1-SW1` oraz `BR2-SW1` odpowiadają za prawidłową separację ruchu oraz ochronę portów abonenckich:
+*   **Podział na VLANy i Porty Access:** Wszystkie porty końcowe zostały na sztywno skonfigurowane w tryb dostępowy (`switchport mode access`) i przypisane do odpowiednich VLAN-ów (MGMT, USERS, LOCAL, GUEST, IT, VOIP).
+*   **Dual-VLAN dla aparatów VoIP:** Porty biurkowe obsługują jednoczesny ruch komputera (nietagowany w VLAN 20) oraz ruch głosowy telefonu (automatycznie tagowany w VLAN 60) za pomocą komendy `switchport voice vlan 60`.
+*   **Konfiguracja Portów Magistralnych (Trunking):** Połączenie pomiędzy przełącznikiem a routerem brzegowym (uplink ROAS) działa jako magistrala trunk (`switchport mode trunk`), przesyłając ruch ze wszystkich lokalnych sieci przy użyciu tagowania 802.1Q.
+*   **Bezpieczeństwo DHCP (DHCP Snooping):** Na switchach w oddziałach aktywowano funkcję DHCP Snooping w celu blokady fałszywych serwerów DHCP. Port magistralny (Trunk) prowadzący do routera brzegowego został oznaczony jako zaufany (`ip dhcp snooping trust`), natomiast wszystkie porty abonenckie i gościnne są niezaufane, co zapobiega wstrzykiwaniu nieautoryzowanej adresacji w oddziale.
